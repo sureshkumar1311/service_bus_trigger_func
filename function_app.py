@@ -71,7 +71,7 @@ def parse_event_grid_message(message_body: Any) -> Dict[str, str]:
 async def process_resume(message_data: Dict[str, str]) -> None:
     """
     Process a single resume screening message (async)
-    ✅ UPDATED: Added duplicate check and removed total_resumes increment
+     UPDATED: Added duplicate check and removed total_resumes increment
     """
     # Initialize service objects (make sure implementations are async-friendly)
     blob_service = AzureBlobService()
@@ -118,7 +118,7 @@ async def process_resume(message_data: Dict[str, str]) -> None:
             logging.info("Initializing screening job tracker")
             await cosmos_service.initialize_screening_job_for_job(job_id, user_id)
 
-        #  REMOVED: Don't increment total_resumes - we count from blob storage
+        # REMOVED: Don't increment total_resumes - we count from blob storage
 
         # 3. Download resume from blob
         logging.info("Downloading resume from blob storage...")
@@ -220,7 +220,7 @@ async def process_resume(message_data: Dict[str, str]) -> None:
 # -----------------------------
 @app.service_bus_queue_trigger(
     arg_name="msg",
-    queue_name="resume-processing-queue",
+    queue_name="%AZURE_SERVICE_BUS_QUEUE_NAME%",
     connection="AZURE_SERVICE_BUS_CONNECTION_STRING",
 )
 async def resume_processor(msg: func.ServiceBusMessage):
