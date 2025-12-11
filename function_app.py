@@ -3,20 +3,31 @@ import re
 import json
 import logging
 import traceback
+import sys
 from datetime import datetime
 from typing import Dict, Any
 
 import azure.functions as func
 
-# Import your services (these must be available in the function app's package)
-from services.azure_blob_service import AzureBlobService
-from services.document_parser import DocumentParser
-from services.ai_screening_service import AIScreeningService
-from services.cosmos_db_service import CosmosDBService
-from config import settings
+# Add current directory to Python path for local imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Create FunctionApp (same style as your HTTP example)
-app = func.FunctionApp()
+# Import your services (these must be available in the function app's package)
+try:
+    from services.azure_blob_service import AzureBlobService
+    from services.document_parser import DocumentParser
+    from services.ai_screening_service import AIScreeningService
+    from services.cosmos_db_service import CosmosDBService
+    from config import settings
+    logging.info("Successfully imported all service modules")
+except ImportError as e:
+    logging.error(f"Failed to import modules: {str(e)}")
+    logging.error(f"Python path: {sys.path}")
+    raise
+
+# Create FunctionApp
+app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
 
 # -----------------------------
 # Helper: parse Event Grid message
@@ -86,7 +97,7 @@ async def process_resume(message_data: Dict[str, str]) -> None:
     logging.info(f"Processing resume: {resume_filename} for job: {job_id}")
 
     try:
-        #  STEP 0: Check if already processed (DUPLICATE CHECK)
+        # STEP 0: Check if already processed (DUPLICATE CHECK)
         is_duplicate = await cosmos_service.is_resume_already_processed(job_id, resume_filename)
         if is_duplicate:
             logging.info(f"Resume already processed - skipping duplicate: {resume_filename}")
@@ -216,16 +227,17 @@ async def process_resume(message_data: Dict[str, str]) -> None:
 
 
 # -----------------------------
-# Service Bus trigger - async handler
+# Service Bus Queue Trigger
 # -----------------------------
 @app.service_bus_queue_trigger(
     arg_name="msg",
     queue_name="resume-processing-queue",
-    connection="AZURE_SERVICE_BUS_CONNECTION_STRING",
+    connection="AZURE_SERVICE_BUS_CONNECTION_STRING"
 )
-async def resume_processor(msg: func.ServiceBusMessage):
+async def resume_processor(msg: func.ServiceBusMessage) -> None:
     """
     Azure Function triggered by Service Bus queue message (async)
+    Processes resume screening jobs from the queue
     """
     logging.info("Service Bus queue trigger function processing message")
 
