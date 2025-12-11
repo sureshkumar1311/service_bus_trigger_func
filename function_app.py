@@ -71,7 +71,7 @@ def parse_event_grid_message(message_body: Any) -> Dict[str, str]:
 async def process_resume(message_data: Dict[str, str]) -> None:
     """
     Process a single resume screening message (async)
-     UPDATED: Added duplicate check and removed total_resumes increment
+    ✅ UPDATED: Added duplicate check and removed total_resumes increment
     """
     # Initialize service objects (make sure implementations are async-friendly)
     blob_service = AzureBlobService()
@@ -197,18 +197,22 @@ async def process_resume(message_data: Dict[str, str]) -> None:
         logging.info("Screening job updated successfully")
 
     except Exception as exc:
-        logging.error(f"Processing failed for job {job_id}, file {resume_filename}: {str(exc)}")
-        logging.debug(traceback.format_exc())
+        error_msg = str(exc)
+        error_trace = traceback.format_exc()
+        
+        logging.error(f"Processing failed for job {job_id}, file {resume_filename}: {error_msg}")
+        logging.debug(error_trace)
+        
         # Attempt to mark the screening as failed in the tracker
         try:
             await cosmos_service.update_screening_job_progress_by_job_id(
                 job_id=job_id, resume_filename=resume_filename, status="failed"
             )
-        except Exception:
-            logging.debug("Could not update failure status in screening job tracker")
-            logging.debug(traceback.format_exc())
-        # Re-raise so Azure Functions runtime knows the function failed and can retry/dead-letter
-        raise
+        except Exception as update_exc:
+            logging.debug(f"Could not update failure status: {str(update_exc)}")
+        
+        # Re-raise with serializable error message
+        raise Exception(f"Resume processing failed: {error_msg}")
 
 
 # -----------------------------
@@ -246,7 +250,11 @@ async def resume_processor(msg: func.ServiceBusMessage):
         logging.info("Message processed successfully")
 
     except Exception as e:
-        logging.error(f"Error processing message: {str(e)}")
-        logging.debug(traceback.format_exc())
-        # Re-raise to let the Functions runtime treat this as a failure (retry / dead-letter)
-        raise
+        error_msg = str(e)
+        error_trace = traceback.format_exc()
+        
+        logging.error(f"Error processing message: {error_msg}")
+        logging.debug(error_trace)
+        
+        # Re-raise with serializable error message
+        raise Exception(f"Message processing failed: {error_msg}")
