@@ -12,7 +12,7 @@ import azure.functions as func
 # Add current directory to Python path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import your services (these must be available in the function app's package)
+# Import your services
 try:
     from services.azure_blob_service import AzureBlobService
     from services.document_parser import DocumentParser
@@ -29,13 +29,8 @@ except ImportError as e:
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 
-# -----------------------------
-# Helper: parse Event Grid message
-# -----------------------------
 def parse_event_grid_message(message_body: Any) -> Dict[str, str]:
-    """
-    Parse Event Grid message to extract job_id, blob_url, and filename
-    """
+    """Parse Event Grid message to extract job_id, blob_url, and filename"""
     try:
         if isinstance(message_body, list):
             event = message_body[0]
@@ -76,15 +71,11 @@ def parse_event_grid_message(message_body: Any) -> Dict[str, str]:
         raise
 
 
-# -----------------------------
-# Async processing function
-# -----------------------------
 async def process_resume(message_data: Dict[str, str]) -> None:
     """
-    Process a single resume screening message (async)
-     UPDATED: Added duplicate check and removed total_resumes increment
+    Process a single resume screening message
+    ✅ UPDATED: Added duplicate check and removed total_resumes increment
     """
-    # Initialize service objects (make sure implementations are async-friendly)
     blob_service = AzureBlobService()
     document_parser = DocumentParser()
     ai_service = AIScreeningService()
@@ -94,16 +85,23 @@ async def process_resume(message_data: Dict[str, str]) -> None:
     resume_blob_url = message_data["resume_blob_url"]
     resume_filename = message_data["resume_filename"]
 
-    logging.info(f"Processing resume: {resume_filename} for job: {job_id}")
+    logging.info(f"\n{'='*60}")
+    logging.info(f"🔄 Processing Resume")
+    logging.info(f"{'='*60}")
+    logging.info(f"   📄 Filename: {resume_filename}")
+    logging.info(f"   🆔 Job ID: {job_id}")
 
     try:
-        # STEP 0: Check if already processed (DUPLICATE CHECK)
+        # ✅ STEP 0: Check if already processed (DUPLICATE CHECK)
         is_duplicate = await cosmos_service.is_resume_already_processed(job_id, resume_filename)
         if is_duplicate:
-            logging.info(f"Resume already processed - skipping duplicate: {resume_filename}")
+            logging.info(f"   ⚠️  Resume already processed - skipping duplicate")
+            logging.info(f"{'='*60}\n")
             return
 
-        # 1. Fetch job description from Cosmos DB
+        # 1. Get job description
+        logging.info(f"\n   📚 Step 1: Fetching job description...")
+        
         query = "SELECT * FROM c WHERE c.job_id = @job_id"
         parameters = [{"name": "@job_id", "value": job_id}]
 
@@ -116,107 +114,136 @@ async def process_resume(message_data: Dict[str, str]) -> None:
         )
 
         if not jobs:
-            raise Exception(f"Job not found: {job_id}")
+            raise Exception(f"Job description not found for job_id: {job_id}")
 
         job_data = jobs[0]
-        user_id = job_data.get("user_id")
+        user_id = job_data["user_id"]
 
-        logging.info(f"Found job: {job_data.get('screening_name')} (user: {user_id})")
+        logging.info(f"      ✅ Job found: {job_data.get('screening_name')}")
+        logging.info(f"      👤 User ID: {user_id}")
 
         # 2. Initialize screening job tracker (if first resume)
+        logging.info(f"\n   📊 Step 2: Updating screening job tracker...")
+        
         screening_job = await cosmos_service.get_screening_job_by_job_id(job_id)
         if not screening_job:
-            logging.info("Initializing screening job tracker")
+            logging.info(f"      🆕 Creating new screening job tracker")
             await cosmos_service.initialize_screening_job_for_job(job_id, user_id)
 
-        #  REMOVED: Don't increment total_resumes - we count from blob storage
+        # ✅ REMOVED: Don't increment total_resumes - we count from blob storage
 
         # 3. Download resume from blob
-        logging.info("Downloading resume from blob storage...")
+        logging.info(f"\n   ⬇️  Step 3: Downloading resume from blob storage...")
         resume_content = await blob_service.download_file(resume_blob_url)
-        size_mb = len(resume_content) / (1024 * 1024)
-        logging.info(f"Downloaded resume size: {size_mb:.2f} MB")
+        file_size_mb = len(resume_content) / (1024 * 1024)
+        logging.info(f"      ✅ Downloaded: {file_size_mb:.2f} MB")
 
         # 4. Parse resume to text
-        logging.info("Parsing resume text...")
+        logging.info(f"\n   📄 Step 4: Parsing resume text...")
         resume_text = await document_parser.parse_document(resume_content, resume_filename)
-        logging.info(f"Extracted {len(resume_text)} characters of text")
+        text_length = len(resume_text)
+        logging.info(f"      ✅ Extracted: {text_length} characters")
 
         # 5. AI screening
-        logging.info("Performing AI screening...")
+        logging.info(f"\n   🤖 Step 5: Performing AI screening...")
+        logging.info(f"      ⏳ This may take 30-60 seconds...")
+        
         screening_result = await ai_service.screen_candidate(
             resume_text=resume_text,
-            job_description=job_data.get("job_description_text", ""),
-            must_have_skills=job_data.get("must_have_skills", []),
-            nice_to_have_skills=job_data.get("nice_to_have_skills", []),
+            job_description=job_data["job_description_text"],
+            must_have_skills=job_data["must_have_skills"],
+            nice_to_have_skills=job_data["nice_to_have_skills"],
         )
-        logging.info(f"AI screening complete. Fit score: {screening_result['fit_score']['score']}%")
+        
+        logging.info(f"      ✅ AI screening completed")
+        logging.info(f"      📊 Fit Score: {screening_result['fit_score']['score']}%")
+        logging.info(f"      👤 Candidate: {screening_result['candidate_info']['name']}")
 
         # 6. Build candidate report (with defensive checks)
-        from models import CandidateReport  # import here to avoid circular imports at module load
+        logging.info(f"\n   📝 Step 6: Creating candidate report...")
+        
+        from models import CandidateReport
 
         # Validate AI summary
-        ai_summary = screening_result.get("ai_summary")
-        if not ai_summary or (isinstance(ai_summary, str) and len(ai_summary) < 3):
+        ai_summary = screening_result["ai_summary"]
+        if not ai_summary or len(ai_summary) < 3:
             ai_summary = [
-                f"Candidate with {screening_result['candidate_info'].get('total_experience')} experience",
-                f"Position: {screening_result['candidate_info'].get('position')}",
+                f"Candidate with {screening_result['candidate_info']['total_experience']} of experience",
+                f"Position: {screening_result['candidate_info']['position']}",
+                f"Skills match: {screening_result['skills_analysis']['must_have_matched']}/{screening_result['skills_analysis']['must_have_total']}"
             ]
 
         # Validate career gap
-        professional_summary = screening_result.get("professional_summary", {}) or {}
-        if professional_summary:
-            professional_summary = professional_summary.copy()
+        professional_summary = screening_result["professional_summary"].copy()
         career_gap = professional_summary.get("career_gap")
         if career_gap and (not career_gap.get("duration") or not isinstance(career_gap.get("duration"), str)):
             professional_summary["career_gap"] = None
 
         candidate_report = CandidateReport(
-            candidate_name=screening_result["candidate_info"].get("name"),
+            candidate_name=screening_result["candidate_info"]["name"],
             email=screening_result["candidate_info"].get("email"),
             phone=screening_result["candidate_info"].get("phone"),
-            position=screening_result["candidate_info"].get("position"),
-            location=screening_result["candidate_info"].get("location"),
-            total_experience=screening_result["candidate_info"].get("total_experience"),
+            position=screening_result["candidate_info"]["position"],
+            location=screening_result["candidate_info"]["location"],
+            total_experience=screening_result["candidate_info"]["total_experience"],
             resume_url=resume_blob_url,
             resume_filename=resume_filename,
-            fit_score=screening_result.get("fit_score"),
-            must_have_skills_matched=screening_result["skills_analysis"].get("must_have_matched"),
-            must_have_skills_total=screening_result["skills_analysis"].get("must_have_total"),
-            nice_to_have_skills_matched=screening_result["skills_analysis"].get("nice_to_have_matched"),
-            nice_to_have_skills_total=screening_result["skills_analysis"].get("nice_to_have_total"),
-            matched_must_have_skills=screening_result["skills_analysis"].get("matched_must_have_list"),
-            matched_nice_to_have_skills=screening_result["skills_analysis"].get("matched_nice_to_have_list"),
+            fit_score=screening_result["fit_score"],
+            must_have_skills_matched=screening_result["skills_analysis"]["must_have_matched"],
+            must_have_skills_total=screening_result["skills_analysis"]["must_have_total"],
+            nice_to_have_skills_matched=screening_result["skills_analysis"]["nice_to_have_matched"],
+            nice_to_have_skills_total=screening_result["skills_analysis"]["nice_to_have_total"],
+            matched_must_have_skills=screening_result["skills_analysis"]["matched_must_have_list"],
+            matched_nice_to_have_skills=screening_result["skills_analysis"]["matched_nice_to_have_list"],
             ai_summary=ai_summary,
-            skill_depth_analysis=screening_result.get("skill_depth_analysis"),
+            skill_depth_analysis=screening_result["skill_depth_analysis"],
             professional_summary=professional_summary,
-            company_tier_analysis=screening_result.get("company_tier_analysis"),
+            company_tier_analysis=screening_result["company_tier_analysis"],
         )
+        
+        logging.info(f"      ✅ Candidate report created")
 
         # 7. Save screening result
-        logging.info("Saving screening result to Cosmos DB...")
+        logging.info(f"\n   💾 Step 7: Saving screening result to database...")
+        
         screening_id = await cosmos_service.save_screening_result(
             job_id=job_id, user_id=user_id, candidate_report=candidate_report.dict()
         )
-        logging.info(f"Saved screening result with ID: {screening_id}")
+        
+        logging.info(f"      ✅ Saved with ID: {screening_id}")
 
         # 8. Update screening progress
+        logging.info(f"\n   📈 Step 8: Updating progress tracker...")
+        
         await cosmos_service.update_screening_job_progress_by_job_id(
             job_id=job_id, resume_filename=resume_filename, status="success", screening_id=screening_id
         )
 
-        logging.info("Screening job updated successfully")
+        logging.info(f"\n{'='*60}")
+        logging.info(f"✅ SUCCESS!")
+        logging.info(f"{'='*60}")
+        logging.info(f"   Candidate: {screening_result['candidate_info']['name']}")
+        logging.info(f"   Fit Score: {screening_result['fit_score']['score']}%")
+        logging.info(f"   Screening ID: {screening_id}")
+        logging.info(f"{'='*60}\n")
 
     except Exception as exc:
         error_msg = str(exc)
         error_trace = traceback.format_exc()
         
-        logging.error(f"Processing failed for job {job_id}, file {resume_filename}: {error_msg}")
+        logging.error(f"\n{'='*60}")
+        logging.error(f"❌ PROCESSING FAILED")
+        logging.error(f"{'='*60}")
+        logging.error(f"   Error: {error_msg}")
+        logging.error(f"   Filename: {resume_filename}")
+        logging.error(f"   Job ID: {job_id}")
+        logging.error(f"{'='*60}\n")
         logging.debug(error_trace)
         
         # Attempt to mark the screening as failed in the tracker
         try:
-            await cosmos_service.update_screening_job_progress_by_job_id(
+            cosmos_service_fallback = CosmosDBService()
+            await cosmos_service_fallback.update_screening_job_progress_by_job_id(
                 job_id=job_id, resume_filename=resume_filename, status="failed"
             )
         except Exception as update_exc:
@@ -226,9 +253,6 @@ async def process_resume(message_data: Dict[str, str]) -> None:
         raise Exception(f"Resume processing failed: {error_msg}")
 
 
-# -----------------------------
-# Service Bus Queue Trigger
-# -----------------------------
 @app.service_bus_queue_trigger(
     arg_name="msg",
     queue_name="resume-processing-queue",
@@ -236,10 +260,10 @@ async def process_resume(message_data: Dict[str, str]) -> None:
 )
 async def resume_processor(msg: func.ServiceBusMessage) -> None:
     """
-    Azure Function triggered by Service Bus queue message (async)
-    Processes resume screening jobs from the queue
+    Azure Function triggered by Service Bus queue message
+    Processes resume screening jobs from the queue with enhanced logging
     """
-    logging.info("Service Bus queue trigger function processing message")
+    logging.info("📬 Service Bus queue trigger function processing message")
 
     try:
         # Parse message body (Event Grid payload)
@@ -259,13 +283,13 @@ async def resume_processor(msg: func.ServiceBusMessage) -> None:
         # Await async processing function
         await process_resume(message_data)
 
-        logging.info("Message processed successfully")
+        logging.info("✅ Message processed successfully")
 
     except Exception as e:
         error_msg = str(e)
         error_trace = traceback.format_exc()
         
-        logging.error(f"Error processing message: {error_msg}")
+        logging.error(f"❌ Error processing message: {error_msg}")
         logging.debug(error_trace)
         
         # Re-raise with serializable error message
