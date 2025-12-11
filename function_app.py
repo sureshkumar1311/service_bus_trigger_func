@@ -118,7 +118,7 @@ async def process_resume(message_data: Dict[str, str]) -> None:
             logging.info("Initializing screening job tracker")
             await cosmos_service.initialize_screening_job_for_job(job_id, user_id)
 
-        # REMOVED: Don't increment total_resumes - we count from blob storage
+        #  REMOVED: Don't increment total_resumes - we count from blob storage
 
         # 3. Download resume from blob
         logging.info("Downloading resume from blob storage...")
@@ -220,7 +220,7 @@ async def process_resume(message_data: Dict[str, str]) -> None:
 # -----------------------------
 @app.service_bus_queue_trigger(
     arg_name="msg",
-    queue_name="%AZURE_SERVICE_BUS_QUEUE_NAME%",
+    queue_name="resume-processing-queue",
     connection="AZURE_SERVICE_BUS_CONNECTION_STRING",
 )
 async def resume_processor(msg: func.ServiceBusMessage):
