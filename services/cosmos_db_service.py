@@ -972,7 +972,7 @@ class CosmosDBService:
             return True
 
 
-    async def increment_total_resumes(self, job_id: str) -> bool:
+    '''async def increment_total_resumes(self, job_id: str) -> bool:
         """
         Increment total resumes counter when new resume is detected
         """
@@ -996,7 +996,7 @@ class CosmosDBService:
         
         except Exception as e:
             print(f"Error incrementing total resumes: {str(e)}")
-            return False
+            return False'''
 
 
     async def update_screening_job_progress_by_job_id(
@@ -1063,6 +1063,80 @@ class CosmosDBService:
             print(f"Error updating screening job progress: {str(e)}")
             return False
 
+    # Add this method to CosmosDBService class
+
+    async def is_resume_already_processed(self, job_id: str, resume_filename: str) -> bool:
+        """
+        Check if resume has already been processed (prevents duplicates)
+        
+        Args:
+            job_id: Job ID
+            resume_filename: Resume filename
+        
+        Returns:
+            True if already processed, False otherwise
+        """
+        try:
+            if not hasattr(self, 'screenings_container'):
+                return False
+            
+            # Query to check if this resume was already processed
+            query = "SELECT VALUE COUNT(1) FROM c WHERE c.job_id = @job_id AND c.resume_filename = @filename"
+            parameters = [
+                {"name": "@job_id", "value": job_id},
+                {"name": "@filename", "value": resume_filename}
+            ]
+            
+            result = list(self.screenings_container.query_items(
+                query=query,
+                parameters=parameters,
+                partition_key=job_id
+            ))
+            
+            count = result[0] if result else 0
+            return count > 0
+        
+        except Exception as e:
+            print(f"Error checking duplicate: {str(e)}")
+            return False
+
+
+    async def get_total_resumes_in_blob(self, job_id: str) -> int:
+        """
+        Count total resumes uploaded in blob storage for a job
+        
+        Args:
+            job_id: Job ID
+        
+        Returns:
+            Total count of resume files in blob storage
+        """
+        try:
+            from azure.storage.blob import BlobServiceClient
+            
+            # Initialize blob client
+            blob_service_client = BlobServiceClient.from_connection_string(
+                settings.AZURE_STORAGE_CONNECTION_STRING
+            )
+            
+            container_client = blob_service_client.get_container_client(
+                settings.AZURE_STORAGE_CONTAINER_RESUMES
+            )
+            
+            # List all blobs with job_id prefix
+            blob_prefix = f"{job_id}/"
+            blobs = container_client.list_blobs(name_starts_with=blob_prefix)
+            
+            # Count blobs (excluding folders)
+            count = sum(1 for blob in blobs if not blob.name.endswith('/'))
+            
+            return count
+        
+        except Exception as e:
+            print(f"Error counting blobs: {str(e)}")
+            return 0
+
+
     async def get_screening_job_status_by_job_id(
         self,
         job_id: str,
@@ -1070,13 +1144,7 @@ class CosmosDBService:
     ) -> Optional[Dict[str, Any]]:
         """
         Get current status of a screening job by job_id (for polling)
-        
-        Args:
-            job_id: Job description ID
-            user_id: User ID (for authorization)
-        
-        Returns:
-            Status dictionary with progress information
+         UPDATED: Shows total_resumes immediately from blob storage
         """
         try:
             # Verify job belongs to user
@@ -1084,34 +1152,69 @@ class CosmosDBService:
             if not job_data:
                 return None
             
+            #  Get total resumes from BLOB STORAGE (not from tracker)
+            total_resumes_in_blob = await self.get_total_resumes_in_blob(job_id)
+            
+            # Get screening job tracker
             screening_job = await self.get_screening_job_by_job_id(job_id)
             
             if not screening_job:
-                # No screening job exists yet
-                return {
-                    "job_id": job_id,
-                    "status": "no_resumes",
-                    "total_resumes": 0,
-                    "processed_resumes": 0,
-                    "successful_resumes": 0,
-                    "failed_resumes": 0,
-                    "progress_percentage": 0,
-                    "completed_results": []
-                }
+                # No processing started yet, but show total from blob
+                if total_resumes_in_blob > 0:
+                    # Files uploaded but not processed yet
+                    return {
+                        "job_id": job_id,
+                        "status": "pending",  # New status
+                        "total_resumes": total_resumes_in_blob,
+                        "processed_resumes": 0,
+                        "successful_resumes": 0,
+                        "failed_resumes": 0,
+                        "progress_percentage": 0,
+                        "completed_results": []
+                    }
+                else:
+                    # No files uploaded
+                    return {
+                        "job_id": job_id,
+                        "status": "no_resumes",
+                        "total_resumes": 0,
+                        "processed_resumes": 0,
+                        "successful_resumes": 0,
+                        "failed_resumes": 0,
+                        "progress_percentage": 0,
+                        "completed_results": []
+                    }
             
             # Get completed screening results
             completed_screenings = await self.get_screening_results(job_id)
             
+            #  Use blob count as source of truth for total
+            processed_resumes = screening_job["processed_resumes"]
+            
+            # Calculate progress
+            if total_resumes_in_blob > 0:
+                progress_percentage = int((processed_resumes / total_resumes_in_blob) * 100)
+            else:
+                progress_percentage = 0
+            
+            # Determine status
+            if processed_resumes >= total_resumes_in_blob and total_resumes_in_blob > 0:
+                status = "completed"
+            elif processed_resumes > 0:
+                status = "processing"
+            else:
+                status = "pending"
+            
             return {
                 "job_id": job_id,
-                "status": screening_job["status"],
-                "total_resumes": screening_job["total_resumes"],
-                "processed_resumes": screening_job["processed_resumes"],
-                "successful_resumes": screening_job["successful_resumes"],
-                "failed_resumes": screening_job["failed_resumes"],
-                "progress_percentage": screening_job.get("progress_percentage", 0),
-                "created_at": screening_job["created_at"],
-                "updated_at": screening_job["updated_at"],
+                "status": status,
+                "total_resumes": total_resumes_in_blob,  #  From blob storage
+                "processed_resumes": processed_resumes,
+                "successful_resumes": screening_job.get("successful_resumes", 0),
+                "failed_resumes": screening_job.get("failed_resumes", 0),
+                "progress_percentage": progress_percentage,
+                "created_at": screening_job.get("created_at"),
+                "updated_at": screening_job.get("updated_at"),
                 "completed_results": completed_screenings
             }
         
