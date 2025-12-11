@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, Any
 
@@ -185,14 +186,16 @@ async def process_resume(message_data: Dict[str, str]) -> None:
         logging.info("Screening job updated successfully")
 
     except Exception as exc:
-        logging.error(f"Processing failed for job {job_id}, file {resume_filename}: {str(exc)}", exc_info=True)
+        logging.error(f"Processing failed for job {job_id}, file {resume_filename}: {str(exc)}")
+        logging.debug(traceback.format_exc())
         # Attempt to mark the screening as failed in the tracker
         try:
             await cosmos_service.update_screening_job_progress_by_job_id(
                 job_id=job_id, resume_filename=resume_filename, status="failed"
             )
         except Exception:
-            logging.debug("Could not update failure status in screening job tracker", exc_info=True)
+            logging.debug("Could not update failure status in screening job tracker")
+            logging.debug(traceback.format_exc())
         # Re-raise so Azure Functions runtime knows the function failed and can retry/dead-letter
         raise
 
@@ -232,6 +235,7 @@ async def resume_processor(msg: func.ServiceBusMessage):
         logging.info("Message processed successfully")
 
     except Exception as e:
-        logging.error(f"Error processing message: {str(e)}", exc_info=True)
+        logging.error(f"Error processing message: {str(e)}")
+        logging.debug(traceback.format_exc())
         # Re-raise to let the Functions runtime treat this as a failure (retry / dead-letter)
         raise
