@@ -71,6 +71,7 @@ def parse_event_grid_message(message_body: Any) -> Dict[str, str]:
 async def process_resume(message_data: Dict[str, str]) -> None:
     """
     Process a single resume screening message (async)
+     UPDATED: Added duplicate check and removed total_resumes increment
     """
     # Initialize service objects (make sure implementations are async-friendly)
     blob_service = AzureBlobService()
@@ -85,6 +86,12 @@ async def process_resume(message_data: Dict[str, str]) -> None:
     logging.info(f"Processing resume: {resume_filename} for job: {job_id}")
 
     try:
+        #  STEP 0: Check if already processed (DUPLICATE CHECK)
+        is_duplicate = await cosmos_service.is_resume_already_processed(job_id, resume_filename)
+        if is_duplicate:
+            logging.info(f"Resume already processed - skipping duplicate: {resume_filename}")
+            return
+
         # 1. Fetch job description from Cosmos DB
         query = "SELECT * FROM c WHERE c.job_id = @job_id"
         parameters = [{"name": "@job_id", "value": job_id}]
@@ -105,13 +112,13 @@ async def process_resume(message_data: Dict[str, str]) -> None:
 
         logging.info(f"Found job: {job_data.get('screening_name')} (user: {user_id})")
 
-        # 2. Initialize or update screening job tracker
+        # 2. Initialize screening job tracker (if first resume)
         screening_job = await cosmos_service.get_screening_job_by_job_id(job_id)
         if not screening_job:
             logging.info("Initializing screening job tracker")
             await cosmos_service.initialize_screening_job_for_job(job_id, user_id)
 
-        await cosmos_service.increment_total_resumes(job_id)
+        #  REMOVED: Don't increment total_resumes - we count from blob storage
 
         # 3. Download resume from blob
         logging.info("Downloading resume from blob storage...")
@@ -137,6 +144,7 @@ async def process_resume(message_data: Dict[str, str]) -> None:
         # 6. Build candidate report (with defensive checks)
         from models import CandidateReport  # import here to avoid circular imports at module load
 
+        # Validate AI summary
         ai_summary = screening_result.get("ai_summary")
         if not ai_summary or (isinstance(ai_summary, str) and len(ai_summary) < 3):
             ai_summary = [
@@ -144,7 +152,10 @@ async def process_resume(message_data: Dict[str, str]) -> None:
                 f"Position: {screening_result['candidate_info'].get('position')}",
             ]
 
+        # Validate career gap
         professional_summary = screening_result.get("professional_summary", {}) or {}
+        if professional_summary:
+            professional_summary = professional_summary.copy()
         career_gap = professional_summary.get("career_gap")
         if career_gap and (not career_gap.get("duration") or not isinstance(career_gap.get("duration"), str)):
             professional_summary["career_gap"] = None
